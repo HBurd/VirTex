@@ -13,6 +13,9 @@ using namespace hbmath;
 #define FAST_OBJ_IMPLEMENTATION
 #include "fast_obj.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #define SCREEN_WIDTH 800
 #define SCREEN_HEIGHT 600
 
@@ -20,7 +23,121 @@ struct Vertex
 {
 	Vec3 pos;
 	Vec3 norm;
+	Vec2 uv;
+
+	float pad = 0.0f;
 };
+
+static_assert(sizeof(Vertex) == 9 * sizeof(float), "Vertex does not have expected memory layout");
+
+GLuint LoadShader(const char* shader_src, GLenum shader_type)
+{
+	char info_log[256];
+
+	GLuint shader = glCreateShader(shader_type);
+	glShaderSource(shader, 1, &shader_src, nullptr);
+	glCompileShader(shader);
+
+	GLsizei info_log_length;
+	glGetShaderInfoLog(shader, sizeof(info_log), &info_log_length, info_log);
+	if (info_log_length >= sizeof(info_log))
+	{
+		info_log[sizeof(info_log) - 1] = 0;
+	}
+	else
+	{
+		info_log[info_log_length] = 0;
+	}
+
+	if (shader_type == GL_VERTEX_SHADER)
+	{
+		printf("Vertex shader info log: ");
+	}
+	else if (shader_type == GL_FRAGMENT_SHADER)
+	{
+		printf("Fragment shader info log: ");
+	}
+	printf("%s\n", info_log);
+
+	return shader;
+}
+
+GLuint LinkProgram(GLuint vertex_shader, GLuint fragment_shader)
+{
+	GLuint shader_program = glCreateProgram();
+	glAttachShader(shader_program, vertex_shader);
+	glAttachShader(shader_program, fragment_shader);
+	glLinkProgram(shader_program);
+
+	return shader_program;
+}
+
+Vertex* ReadObj(const char *filename, size_t *vertex_count, char **texture_path)
+{
+	*vertex_count = 0;
+	Vertex* vertices;
+	fastObjMesh* mesh = fast_obj_read(filename);
+
+	size_t face_vertices = 3;
+
+	vertices = new Vertex[face_vertices * mesh->face_count];
+
+	if (mesh->group_count == 0)
+	{
+		printf("mesh has no groups\n");
+		exit(1);
+	}
+
+	size_t group = 0;
+
+	if (mesh->index_count != face_vertices * mesh->groups[0].face_count)
+	{
+		printf("only triangulated meshes are supported\n");
+		exit(1);
+	}
+
+	size_t material_index = mesh->face_materials[mesh->groups[group].face_offset];
+
+	for (size_t i = 0; i < mesh->groups[group].face_count; ++i)
+	{
+		if (mesh->face_vertices[i + mesh->groups[group].face_offset] != face_vertices)
+		{
+			printf("only triangulated meshes are supported\n");
+			exit(1);
+		}
+
+		if (mesh->face_materials[i + mesh->groups[group].face_offset] != material_index)
+		{
+			printf("only one material per group is supported\n");
+			exit(1);
+		}
+
+		// Push each corner of face
+		for (size_t v = 0; v < face_vertices; ++v)
+		{
+			size_t index_offset = mesh->groups[group].index_offset + i * face_vertices + v;
+
+			size_t pos_index = mesh->indices[index_offset].p;
+			size_t norm_index = mesh->indices[index_offset].n;
+			size_t uv_index = mesh->indices[index_offset].t;
+			memcpy(&vertices[*vertex_count].pos, mesh->positions + 3 * pos_index, sizeof(Vec3));
+			memcpy(&vertices[*vertex_count].norm, mesh->normals + 3 * norm_index, sizeof(Vec3));
+			memcpy(&vertices[*vertex_count].uv, mesh->texcoords + 2 * uv_index, sizeof(Vec2));
+			*vertex_count += 1;
+		}
+	}
+
+	size_t texture_index = mesh->materials[material_index].map_Kd;
+	char* texture_path_src = mesh->textures[texture_index].path;
+	*texture_path = new char[strlen(texture_path_src) + 1];
+	memcpy(*texture_path, texture_path_src, strlen(texture_path_src) + 1);
+
+	assert(face_vertices * mesh->face_count == *vertex_count);
+
+	fast_obj_destroy(mesh);
+
+	return vertices;
+}
 
 int main()
 {
@@ -48,54 +165,11 @@ int main()
 
 	GLuint vbo;
 	GLuint vao;
-	size_t vertex_count = 0;
-	Vertex* vertices;
+	GLuint texture;
+	size_t vertex_count;
 	{
-		fastObjMesh* mesh = fast_obj_read("assets/terrain.obj");
-
-
-		size_t face_vertices = 3;
-
-		vertices = new Vertex[face_vertices * mesh->face_count];
-
-		if (mesh->group_count == 0)
-		{
-			printf("mesh has no groups\n");
-			exit(1);
-		}
-
-		size_t group = 0;
-
-		if (mesh->index_count != face_vertices * mesh->groups[0].face_count)
-		{
-			printf("only triangulated meshes are supported\n");
-			exit(1);
-		}
-
-		for (size_t i = 0; i < mesh->groups[group].face_count; ++i)
-		{
-			if (mesh->face_vertices[i + mesh->groups[group].face_offset] != face_vertices)
-			{
-				printf("only triangulated meshes are supported\n");
-				exit(1);
-			}
-
-			// Push each corner of face
-			for (size_t v = 0; v < face_vertices; ++v)
-			{
-				size_t index_offset = mesh->groups[group].index_offset + i * face_vertices + v;
-
-				size_t pos_index = mesh->indices[index_offset].p;
-				size_t norm_index = mesh->indices[index_offset].n;
-				memcpy(&vertices[vertex_count].pos, mesh->positions + 3 * pos_index, sizeof(Vec3));
-				memcpy(&vertices[vertex_count].norm, mesh->normals + 3 * norm_index, sizeof(Vec3));
-				vertex_count += 1;
-			}
-		}
-
-		assert(face_vertices * mesh->face_count == vertex_count);
-
-		fast_obj_destroy(mesh);
+		char* texture_path;
+		Vertex* vertices = ReadObj("assets/terrain.obj", &vertex_count, &texture_path);
 
 		glGenBuffers(1, &vbo);
 		glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -104,9 +178,26 @@ int main()
 		glGenVertexArrays(1, &vao);
 		glBindVertexArray(vao);
 		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), nullptr);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, pos)));
 		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(sizeof(Vec3)));
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, norm)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, uv)));
+
+		int w, h, n;
+		uint8_t *texture_data = stbi_load(texture_path, &w, &h, &n, 3);
+		n = 3;
+
+		glGenTextures(1, &texture);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, texture_data);
+		glGenerateMipmap(GL_TEXTURE_2D);
+
+		glActiveTexture(GL_TEXTURE1);
+
+		stbi_image_free(texture_data);
+		delete[] texture_path;
+		delete[] vertices;
 	}
 
 	printf("Loaded mesh with %zu vertices\n", vertex_count);
@@ -115,68 +206,39 @@ int main()
 		"#version 430\n"
 		"in layout(location = 0) vec3 vpos;\n"
 		"in layout(location = 1) vec3 vnorm;\n"
+		"in layout(location = 2) vec2 uv;\n"
 		"layout (location = 0) uniform vec3 position;\n"
 		"layout (location = 1) uniform mat3 rotation;\n"
 		"layout (location = 2) uniform mat4 perspective;\n"
 		"layout (location = 3) uniform mat3 camera;\n"
 		"out vec3 norm;\n"
+		"out vec2 uv_out;\n"
 		"void main() {\n"
-		"    vec3 pos = rotation * vpos;"
+		"    vec3 pos = rotation * vpos;\n"
 		"    pos += position;\n"
 		"    pos = camera * pos;\n"
 		"    gl_Position = perspective * vec4(pos.x, pos.y, pos.z, 1.0f);\n"
 		"    norm = vnorm;\n"
+		"    uv_out = uv;\n"
 		"}\n";
 
 	const char* fragment_shader_src =
 		"#version 430\n"
 		"in vec3 norm;\n"
+		"in vec2 uv_out;"
 		"out vec4 color;\n"
+		"uniform sampler2D color_texture;\n"
 		"void main() {\n"
 		"    float brightness = dot(norm, vec3(0.0f, 1.0f, 0.0f));\n"
-		"    color = brightness * vec4(1.0f, 1.0f, 1.0f, 1.0f);\n"
+		"    vec3 texture_color = texture(color_texture, uv_out).rgb;\n"
+		"    color = brightness * vec4(texture_color.r, texture_color.g, texture_color.b, 1.0f);\n"
 		"}\n";
 
-	char info_log[64];
-
-	GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
-	glShaderSource(vertex_shader, 1, &vertex_shader_src, nullptr);
-	glCompileShader(vertex_shader);
-
-	GLsizei info_log_length;
-	glGetShaderInfoLog(vertex_shader, sizeof(info_log), &info_log_length, info_log);
-	if (info_log_length >= sizeof(info_log))
-	{
-		info_log[sizeof(info_log) - 1] = 0;
-	}
-	else
-	{
-		info_log[info_log_length] = 0;
-	}
-	printf("%s\n", info_log);
-
-	GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
-	glShaderSource(fragment_shader, 1, &fragment_shader_src, nullptr);
-	glCompileShader(fragment_shader);
-
-	glGetShaderInfoLog(fragment_shader, sizeof(info_log), &info_log_length, info_log);
-	if (info_log_length >= sizeof(info_log))
-	{
-		info_log[sizeof(info_log) - 1] = 0;
-	}
-	else
-	{
-		info_log[info_log_length] = 0;
-	}
-	printf("%s\n", info_log);
-
-	GLuint shader_program = glCreateProgram();
-	glAttachShader(shader_program, vertex_shader);
-	glAttachShader(shader_program, fragment_shader);
-	glLinkProgram(shader_program);
+	GLuint vertex_shader = LoadShader(vertex_shader_src, GL_VERTEX_SHADER);
+	GLuint fragment_shader = LoadShader(fragment_shader_src, GL_FRAGMENT_SHADER);
+	GLuint shader_program = LinkProgram(vertex_shader, fragment_shader);
 
 	glUseProgram(shader_program);
-
 
 	glClearColor(0.5f, 0.6f, 0.7f, 1.0f);
 
@@ -202,8 +264,8 @@ int main()
 	bool running = true;
 	while (running)
 	{
-		int32_t mouse_dx = 0.0f;
-		int32_t mouse_dy = 0.0f;
+		int32_t mouse_dx = 0;
+		int32_t mouse_dy = 0;
 
 		SDL_Event event;
 		while (SDL_PollEvent(&event))
@@ -239,10 +301,10 @@ int main()
 		camera_yaw += (float)mouse_dx * 0.01f;
 		camera_pitch += (float)mouse_dy * 0.01f;
 
-		if (camera_yaw > M_PI) camera_yaw -= 2.0f * M_PI;
-		if (camera_yaw < -M_PI) camera_yaw += 2.0f * M_PI;
-		if (camera_pitch > 0.5f * M_PI) camera_pitch = 0.5f * M_PI;
-		if (camera_pitch < -0.5f * M_PI) camera_pitch = -0.5f * M_PI;
+		if (camera_yaw > M_PI) camera_yaw -= 2.0f * (float)M_PI;
+		if (camera_yaw < -M_PI) camera_yaw += 2.0f * (float)M_PI;
+		if (camera_pitch > 0.5f * M_PI) camera_pitch = 0.5f * (float)M_PI;
+		if (camera_pitch < -0.5f * M_PI) camera_pitch = -0.5f * (float)M_PI;
 
 		Quaternion camera_rotation = Quaternion::RotateX(camera_pitch) * Quaternion::RotateY(camera_yaw);
 
