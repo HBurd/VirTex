@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <vector>
 
 #include "SDL.h"
 #undef main
@@ -26,6 +27,16 @@ struct Vertex
 	Vec2 uv;
 
 	float pad = 0.0f;
+};
+
+struct RenderObj
+{
+	GLuint vbo;
+	GLuint vao;
+	GLuint texture;
+	bool textured;
+
+	size_t vertex_count;
 };
 
 static_assert(sizeof(Vertex) == 9 * sizeof(float), "Vertex does not have expected memory layout");
@@ -72,27 +83,18 @@ GLuint LinkProgram(GLuint vertex_shader, GLuint fragment_shader)
 	return shader_program;
 }
 
-Vertex* ReadObj(const char *filename, size_t *vertex_count, char **texture_path)
+Vertex* ReadObj(fastObjMesh *mesh, size_t group, size_t *vertex_count, char **texture_path)
 {
 	*vertex_count = 0;
 	Vertex* vertices;
-	fastObjMesh* mesh = fast_obj_read(filename);
 
 	size_t face_vertices = 3;
 
 	vertices = new Vertex[face_vertices * mesh->face_count];
 
-	if (mesh->group_count == 0)
+	if (mesh->group_count <= group)
 	{
-		printf("mesh has no groups\n");
-		exit(1);
-	}
-
-	size_t group = 0;
-
-	if (mesh->index_count != face_vertices * mesh->groups[0].face_count)
-	{
-		printf("only triangulated meshes are supported\n");
+		printf("group does not exist\n");
 		exit(1);
 	}
 
@@ -103,7 +105,7 @@ Vertex* ReadObj(const char *filename, size_t *vertex_count, char **texture_path)
 		if (mesh->face_vertices[i + mesh->groups[group].face_offset] != face_vertices)
 		{
 			printf("only triangulated meshes are supported\n");
-			exit(1);
+			assert(false);
 		}
 
 		if (mesh->face_materials[i + mesh->groups[group].face_offset] != material_index)
@@ -128,15 +130,70 @@ Vertex* ReadObj(const char *filename, size_t *vertex_count, char **texture_path)
 	}
 
 	size_t texture_index = mesh->materials[material_index].map_Kd;
-	char* texture_path_src = mesh->textures[texture_index].path;
-	*texture_path = new char[strlen(texture_path_src) + 1];
-	memcpy(*texture_path, texture_path_src, strlen(texture_path_src) + 1);
 
-	assert(face_vertices * mesh->face_count == *vertex_count);
+	if (texture_index)
+	{
+        char* texture_path_src = mesh->textures[texture_index].path;
+        *texture_path = new char[strlen(texture_path_src) + 1];
+        memcpy(*texture_path, texture_path_src, strlen(texture_path_src) + 1);
+	}
+	else
+	{
+		*texture_path = nullptr;
+	}
 
-	fast_obj_destroy(mesh);
+	assert(face_vertices * mesh->groups[group].face_count == *vertex_count);
+
+	printf("Loaded mesh with %zu vertices\n", *vertex_count);
 
 	return vertices;
+}
+
+RenderObj LoadRenderObj(fastObjMesh* mesh, size_t index)
+{
+	RenderObj obj;
+	char *texture_path;
+	Vertex* vertices = ReadObj(mesh, index, &obj.vertex_count, &texture_path);
+	assert(vertices);
+
+    glGenBuffers(1, &obj.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, obj.vbo);
+    glBufferData(GL_ARRAY_BUFFER, obj.vertex_count * sizeof(*vertices), vertices, GL_STATIC_DRAW);
+
+	obj.textured = texture_path != nullptr;
+
+    glGenVertexArrays(1, &obj.vao);
+    glBindVertexArray(obj.vao);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, pos)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, norm)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, uv)));
+
+	if (obj.textured)
+	{
+		printf("loading texture %s\n", texture_path);
+        int w, h, n;
+		uint8_t *texture_data = stbi_load(texture_path, &w, &h, &n, 3);
+        n = 3;
+
+        glGenTextures(1, &obj.texture);
+        glBindTexture(GL_TEXTURE_2D, obj.texture);
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, texture_data);
+        glGenerateMipmap(GL_TEXTURE_2D);
+
+        stbi_image_free(texture_data);
+        delete[] texture_path;
+	}
+    delete[] vertices;
+	return obj;
 }
 
 int main()
@@ -163,44 +220,16 @@ int main()
 	glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 	glEnable(GL_DEPTH_TEST);
 
-	GLuint vbo;
-	GLuint vao;
-	GLuint texture;
-	size_t vertex_count;
+	std::vector<RenderObj> render_objects;
 	{
-		char* texture_path;
-		Vertex* vertices = ReadObj("assets/terrain.obj", &vertex_count, &texture_path);
+		fastObjMesh* mesh = fast_obj_read("assets/terrain.obj");
+		printf("%u groups in mesh\n", mesh->group_count);
 
-		glGenBuffers(1, &vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-		glBufferData(GL_ARRAY_BUFFER, vertex_count * sizeof(*vertices), vertices, GL_STATIC_DRAW);
+		render_objects.push_back(LoadRenderObj(mesh, 0));
+		render_objects.push_back(LoadRenderObj(mesh, 1));
 
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, pos)));
-		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, norm)));
-		glEnableVertexAttribArray(2);
-		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(offsetof(Vertex, uv)));
-
-		int w, h, n;
-		uint8_t *texture_data = stbi_load(texture_path, &w, &h, &n, 3);
-		n = 3;
-
-		glGenTextures(1, &texture);
-		glBindTexture(GL_TEXTURE_2D, texture);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, texture_data);
-		glGenerateMipmap(GL_TEXTURE_2D);
-
-		glActiveTexture(GL_TEXTURE1);
-
-		stbi_image_free(texture_data);
-		delete[] texture_path;
-		delete[] vertices;
+		fast_obj_destroy(mesh);
 	}
-
-	printf("Loaded mesh with %zu vertices\n", vertex_count);
 
 	const char *vertex_shader_src =
 		"#version 430\n"
@@ -214,7 +243,8 @@ int main()
 		"out vec3 norm;\n"
 		"out vec2 uv_out;\n"
 		"void main() {\n"
-		"    vec3 pos = rotation * vpos;\n"
+		// TODO: Why do I need to negate vertex position???
+		"    vec3 pos = rotation * -vpos;\n"
 		"    pos += position;\n"
 		"    pos = camera * pos;\n"
 		"    gl_Position = perspective * vec4(pos.x, pos.y, pos.z, 1.0f);\n"
@@ -228,9 +258,10 @@ int main()
 		"in vec2 uv_out;"
 		"out vec4 color;\n"
 		"uniform sampler2D color_texture;\n"
+		"layout (location = 8) uniform float uv_scale_factor;"
 		"void main() {\n"
-		"    float brightness = dot(norm, vec3(0.0f, 1.0f, 0.0f));\n"
-		"    vec3 texture_color = texture(color_texture, uv_out).rgb;\n"
+		"    float brightness = 0.5f + 0.5f * dot(norm, vec3(0.0f, 1.0f, 0.0f));\n"
+		"    vec3 texture_color = texture(color_texture, uv_out * uv_scale_factor).rgb;\n"
 		"    color = brightness * vec4(texture_color.r, texture_color.g, texture_color.b, 1.0f);\n"
 		"}\n";
 
@@ -252,7 +283,7 @@ int main()
 	float camera_pitch = 0.0f;
 	float camera_yaw = 0.0f;
 
-	Vec3 camera_pos(0.0f, 0.4f, 1.0f);
+	Vec3 camera_pos(0.0f, 5.0f, 0.0f);
 
 	bool w_down = false;;
 	bool a_down = false;
@@ -324,18 +355,31 @@ int main()
 
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		glUniform3fv(0, 1, (position - camera_pos).array());
-
-		Mat3 rotation_mat;
-		glUniformMatrix3fv(1, 1, GL_TRUE, rotation_mat.data);
-
 		glUniformMatrix4fv(2, 1, GL_TRUE, perspective_mat.data);
 
 		Mat3 camera_rotation_mat;
 		camera_rotation.to_matrix(camera_rotation_mat.data);
 		glUniformMatrix3fv(3, 1, GL_TRUE, camera_rotation_mat.data);
 
-		glDrawArrays(GL_TRIANGLES, 0, vertex_count);
+		for (const RenderObj &render_object : render_objects)
+		{
+			glBindVertexArray(render_object.vao);
+			if (render_object.textured)
+			{
+				glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, render_object.texture);
+			}
+
+            glUniform3fv(0, 1, (position - camera_pos).array());
+
+            Mat3 rotation_mat;
+            glUniformMatrix3fv(1, 1, GL_TRUE, rotation_mat.data);
+
+            glUniform1f(8, 1.0f);
+
+            glDrawArrays(GL_TRIANGLES, 0, render_object.vertex_count);
+		}
+
 		SDL_GL_SwapWindow(window);
 
 		uint64_t perf_cnt_now = SDL_GetPerformanceCounter();
