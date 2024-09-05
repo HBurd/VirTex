@@ -25,8 +25,6 @@ struct Vertex
 	Vec3 pos;
 	Vec3 norm;
 	Vec2 uv;
-
-	float pad = 0.0f;
 };
 
 struct RenderObj
@@ -39,7 +37,7 @@ struct RenderObj
 	size_t vertex_count;
 };
 
-static_assert(sizeof(Vertex) == 9 * sizeof(float), "Vertex does not have expected memory layout");
+static_assert(sizeof(Vertex) == 8 * sizeof(float), "Vertex does not have expected memory layout");
 
 GLuint LoadShader(const char* shader_src, GLenum shader_type)
 {
@@ -181,7 +179,7 @@ RenderObj LoadRenderObj(fastObjMesh* mesh, size_t index)
         glGenTextures(1, &obj.texture);
         glBindTexture(GL_TEXTURE_2D, obj.texture);
 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -200,7 +198,14 @@ int main()
 {
 	SDL_Init(SDL_INIT_VIDEO);
 
-	SDL_Window* window = SDL_CreateWindow("virtual texturing demo", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_OPENGL);
+	SDL_Window* window = SDL_CreateWindow(
+		"virtual texturing demo",
+		SDL_WINDOWPOS_UNDEFINED,
+		SDL_WINDOWPOS_UNDEFINED,
+		SCREEN_WIDTH,
+		SCREEN_HEIGHT,
+		SDL_WINDOW_OPENGL);
+
 	SDL_SetRelativeMouseMode(SDL_TRUE);
 
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
@@ -215,10 +220,12 @@ int main()
 		exit(1);
 	}
 
-	printf("Using OpenGL version %s\n", glGetString(GL_VERSION));
-
 	glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+
+	glClearColor(0.5f, 0.6f, 0.7f, 1.0f);
 
 	std::vector<RenderObj> render_objects;
 	{
@@ -243,8 +250,7 @@ int main()
 		"out vec3 norm;\n"
 		"out vec2 uv_out;\n"
 		"void main() {\n"
-		// TODO: Why do I need to negate vertex position???
-		"    vec3 pos = rotation * -vpos;\n"
+		"    vec3 pos = rotation * vpos;\n"
 		"    pos += position;\n"
 		"    pos = camera * pos;\n"
 		"    gl_Position = perspective * vec4(pos.x, pos.y, pos.z, 1.0f);\n"
@@ -258,9 +264,9 @@ int main()
 		"in vec2 uv_out;"
 		"out vec4 color;\n"
 		"uniform sampler2D color_texture;\n"
-		"layout (location = 8) uniform float uv_scale_factor;"
+		"layout (location = 8) uniform float uv_scale_factor;\n"
 		"void main() {\n"
-		"    float brightness = 0.5f + 0.5f * dot(norm, vec3(0.0f, 1.0f, 0.0f));\n"
+		"    float brightness = 0.5f + 0.5f * clamp(dot(norm, vec3(0.0f, 1.0f, 0.0f)), 0.0f, 1.0f);\n"
 		"    vec3 texture_color = texture(color_texture, uv_out * uv_scale_factor).rgb;\n"
 		"    color = brightness * vec4(texture_color.r, texture_color.g, texture_color.b, 1.0f);\n"
 		"}\n";
@@ -270,8 +276,6 @@ int main()
 	GLuint shader_program = LinkProgram(vertex_shader, fragment_shader);
 
 	glUseProgram(shader_program);
-
-	glClearColor(0.5f, 0.6f, 0.7f, 1.0f);
 
 	Mat4 perspective_mat = Mat4::Perspective(0.1f, 100.0f, 0.5f * (float)M_PI, (float)SCREEN_WIDTH / (float)SCREEN_HEIGHT);
 
@@ -291,6 +295,7 @@ int main()
 	bool d_down = false;
 	bool q_down = false;
 	bool e_down = false;
+	bool shift_down = false;
 
 	bool running = true;
 	while (running)
@@ -317,6 +322,7 @@ int main()
 				if (event.key.keysym.sym == SDLK_d) d_down = true;
 				if (event.key.keysym.sym == SDLK_q) q_down = true;
 				if (event.key.keysym.sym == SDLK_e) e_down = true;
+				if (event.key.keysym.sym == SDLK_LSHIFT) shift_down = true;
 				break;
 			case SDL_KEYUP:
 				if (event.key.keysym.sym == SDLK_w) w_down = false;
@@ -325,6 +331,7 @@ int main()
 				if (event.key.keysym.sym == SDLK_d) d_down = false;
 				if (event.key.keysym.sym == SDLK_q) q_down = false;
 				if (event.key.keysym.sym == SDLK_e) e_down = false;
+				if (event.key.keysym.sym == SDLK_LSHIFT) shift_down = false;
 				break;
 			}
 		}
@@ -346,6 +353,8 @@ int main()
 		if (d_down) camera_delta.x += 0.02f;
 		if (q_down) camera_delta.y -= 0.02f;
 		if (e_down) camera_delta.y += 0.02f;
+
+		if (shift_down) camera_delta *= 3;
 
 		Mat3 camera_rotation_inverse_mat;
 		camera_rotation.inverse().to_matrix(camera_rotation_inverse_mat.data);
@@ -386,7 +395,7 @@ int main()
 		uint64_t perf_cnt_delta = perf_cnt_now - perf_cnt;
 		double fps = (double)perf_freq / (double)perf_cnt_delta;
 		perf_cnt = perf_cnt_now;
-		printf("%.3f FPS\r", fps);
+		printf("%.3f FPS      \r", fps);
 	}
 
 	return 0;
